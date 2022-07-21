@@ -7,23 +7,31 @@ pub use pallet::*;
 
 use frame_support::inherent::Vec;
 use frame_support::pallet_prelude::*;
+use frame_support::sp_runtime::ArithmeticError;
+use frame_support::storage::bounded_vec::BoundedVec;
+use frame_support::traits::{Randomness, UnixTime};
 use frame_system::pallet_prelude::*;
+use scale_info::TypeInfo;
+pub type DNA = Vec<u8>;
+const MAX_BOUND: u32 = 5;
+pub type KittiesBounce = BoundedVec<DNA, ConstU32<MAX_BOUND>>;
 
 #[frame_support::pallet]
 pub mod pallet {
 
 	pub use super::*;
 
-	#[derive(TypeInfo, Default, Encode, Decode)]
+	#[derive(Clone, Encode, Decode, PartialEq, RuntimeDebug, TypeInfo)]
 	#[scale_info(skip_type_params(T))]
 	pub struct Kitty<T: Config> {
-		dna: Vec<u8>,
+		dna: DNA,
 		price: u32,
 		owner: T::AccountId,
 		gender: Gender,
+		created_date: u64,
 	}
 
-	#[derive(TypeInfo, Encode, Decode, Debug)]
+	#[derive(Clone, Encode, Decode, PartialEq, Copy, RuntimeDebug, TypeInfo, MaxEncodedLen)]
 	pub enum Gender {
 		Male,
 		Female,
@@ -38,6 +46,8 @@ pub mod pallet {
 	pub trait Config: frame_system::Config {
 		/// Because this pallet emits events, it depends on the runtime's definition of an event.
 		type Event: From<Event<Self>> + IsType<<Self as frame_system::Config>::Event>;
+		type UnixTime: UnixTime;
+		type Randomness: Randomness<Self::Hash, u32>;
 	}
 
 	#[pallet::pallet]
@@ -47,105 +57,116 @@ pub mod pallet {
 
 	#[pallet::storage]
 	#[pallet::getter(fn balance)]
-	pub type Balance<T: Config> = StorageMap<_, Blake2_128, T::AccountId, Vec<Vec<u8>>>;
+	pub(super) type KittiesOwned<T: Config> =
+		StorageMap<_, Blake2_128, T::AccountId, KittiesBounce, ValueQuery>;
 
 	#[pallet::storage]
 	#[pallet::getter(fn kitty_info)]
-	pub(super) type KittyInfo<T: Config> = StorageMap<_, Blake2_128, Vec<u8>, Kitty<T>>;
+	pub(super) type Kitties<T: Config> = StorageMap<_, Blake2_128, DNA, Kitty<T>>;
 
 	#[pallet::storage]
 	#[pallet::getter(fn total_kitty)]
-	pub type TotalKitty<T> = StorageValue<_, u32, ValueQuery, ConstU32<0>>;
+	pub type KittyId<T> = StorageValue<_, u32, ValueQuery, ConstU32<0>>;
 
 	#[pallet::event]
 	#[pallet::generate_deposit(pub(super) fn deposit_event)]
 	pub enum Event<T: Config> {
-		Create(T::AccountId, Vec<u8>),
-		Transfer(T::AccountId, T::AccountId, Vec<u8>),
+		Created { kitty: DNA, owner: T::AccountId },
+		Transferred { from: T::AccountId, to: T::AccountId, kitty: DNA },
 	}
 
 	// Errors inform users that something went wrong.
 	#[pallet::error]
 	pub enum Error<T> {
-		/// Error names should be descriptive.
-		NoneValue,
-		/// Errors should have helpful documentation associated with them.
-		StorageOverflow,
+		DuplicateKitty,
+		TooManyOwned,
+		NoKitty,
+		NotOwner,
+		TransferToSelf,
+		OutOfKittySlot,
 	}
 
 	#[pallet::call]
 	impl<T: Config> Pallet<T> {
 		/// An example dispatchable that takes a singles value as a parameter, writes the value to
 		/// storage and emits an event. This function must be dispatched by a signed extrinsic.
-		#[pallet::weight(10_000 + T::DbWeight::get().writes(1))]
-		pub fn create(origin: OriginFor<T>, dna: Vec<u8>, price: u32) -> DispatchResult {
-			let who = ensure_signed(origin)?;
-
+		#[pallet::weight(0)]
+		pub fn create(origin: OriginFor<T>, price: u32) -> DispatchResult {
+			let owner = ensure_signed(origin)?;
+			let timestamp = T::UnixTime::now().as_secs();
+			let kitty_id = KittyId::<T>::get() as u8;
+			let (rand, _) = T::Randomness::random(&[timestamp as u8 * kitty_id]);
+			let dna = rand.encode();
 			let gender = Self::gen_gender(&dna)?;
+			let kitty = Kitty::<T> {
+				dna: dna.clone(),
+				price,
+				gender,
+				owner: owner.clone(),
+				created_date: timestamp,
+			};
 
-			let mut _current_account_kitty = <Balance<T>>::get(&who).unwrap_or(Vec::new());
-			_current_account_kitty.push(dna.clone());
-			<Balance<T>>::insert(&who, _current_account_kitty);
+			// Check if the kitty does not already exist in our storage map
+			ensure!(!Kitties::<T>::contains_key(&kitty.dna), Error::<T>::DuplicateKitty);
 
-			let _current_total_kitty = <TotalKitty<T>>::get();
-			<TotalKitty<T>>::put(_current_total_kitty + 1);
+			// Performs this operation first as it may fail
+			let current_id = KittyId::<T>::get();
+			let next_id = current_id.checked_add(1).ok_or(ArithmeticError::Overflow)?;
 
-			let kitty = Kitty::<T> { dna: dna.clone(), price, owner: who.clone(), gender };
-			<KittyInfo<T>>::insert(dna.clone(), kitty);
+			// Append kitty to KittiesOwned
+			if KittiesOwned::<T>::try_append(&owner, kitty.dna.clone()).is_err() {
+				return Err(Error::<T>::OutOfKittySlot.into());
+			}
+			// Write new kitty to storage
+			Kitties::<T>::insert(kitty.dna.clone(), kitty);
+			KittyId::<T>::put(next_id);
 
-			// Emit an event.
-			Self::deposit_event(Event::Create(who, dna));
-			// Return a successful DispatchResultWithPostInfo
+			// Deposit our "Created" event.
+			Self::deposit_event(Event::Created { kitty: dna, owner: owner.clone() });
 			Ok(())
 		}
 
-		#[pallet::weight(10_000 + T::DbWeight::get().writes(1))]
-		pub fn transfer(origin: OriginFor<T>, dna: Vec<u8>, to: T::AccountId) -> DispatchResult {
-			let who = ensure_signed(origin)?;
-			let mut _current_from_kitty = <Balance<T>>::get(&who).unwrap_or(Vec::new());
+		#[pallet::weight(0)]
+		pub fn transfer(origin: OriginFor<T>, dna: DNA, to: T::AccountId) -> DispatchResult {
+			let from = ensure_signed(origin)?;
+			let mut kitty = Kitties::<T>::get(&dna).ok_or(Error::<T>::NoKitty)?;
+			ensure!(kitty.owner == from, Error::<T>::NotOwner);
+			ensure!(from != to, Error::<T>::TransferToSelf);
 
-			let mut is_exist = false;
-			for (_idx, _dna) in _current_from_kitty.iter().enumerate() {
-				if Self::check_equal_vec(&dna, &_dna)? {
-					is_exist = true;
+			let mut from_owned = KittiesOwned::<T>::get(&from);
 
-					_current_from_kitty.remove(_idx);
-					<Balance<T>>::insert(&who, _current_from_kitty);
-
-					let mut _current_to_kitty = <Balance<T>>::get(&to).unwrap_or(Vec::new());
-					_current_to_kitty.push(dna.clone());
-					<Balance<T>>::insert(&to, _current_to_kitty);
-
-					let mut kitty = <KittyInfo<T>>::get(&dna).unwrap();
-					kitty.owner = to.clone();
-					<KittyInfo<T>>::insert(dna.clone(), kitty);
-					
-					break;
-				}
-			}
-
-			// Emit an event.
-			if is_exist {
-				Self::deposit_event(Event::Transfer(who, to, dna));
-				Ok(())
+			// Remove kitty from list of owned kitties.
+			if let Some(ind) = from_owned.iter().position(|ids| *ids == dna) {
+				from_owned.swap_remove(ind);
 			} else {
-				Err(Error::<T>::NoneValue)?
+				return Err(Error::<T>::NoKitty.into());
 			}
+
+			let mut to_owned = KittiesOwned::<T>::get(&to);
+			if to_owned.try_push(dna.clone()).is_err() {
+				return Err(Error::<T>::OutOfKittySlot.into());
+			}
+			kitty.owner = to.clone();
+
+			// Write updates to storage
+			Kitties::<T>::insert(&dna, kitty);
+			KittiesOwned::<T>::insert(&to, to_owned);
+			KittiesOwned::<T>::insert(&from, from_owned);
+
+			Self::deposit_event(Event::Transferred { from, to, kitty: dna });
+
+			Ok(())
 			// Return a successful DispatchResultWithPostInfo
 		}
 	}
 }
 
 impl<T> Pallet<T> {
-	fn gen_gender(dna: &Vec<u8>) -> Result<Gender, Error<T>> {
+	fn gen_gender(dna: &DNA) -> Result<Gender, Error<T>> {
 		let mut res = Gender::Male;
 		if dna.len() % 2 == 0 {
-			res = Gender::Male;
+			res = Gender::Female;
 		}
 		Ok(res)
-	}
-
-	fn check_equal_vec(arr1: &Vec<u8>, arr2: &Vec<u8>) -> Result<bool, Error<T>> {
-		Ok(arr1.iter().eq(arr2.iter()))
 	}
 }
