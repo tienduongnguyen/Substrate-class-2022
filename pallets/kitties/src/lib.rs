@@ -5,6 +5,16 @@
 /// <https://docs.substrate.io/v3/runtime/frame>
 pub use pallet::*;
 
+#[cfg(test)]
+mod mock;
+
+#[cfg(test)]
+mod tests;
+
+#[cfg(feature = "runtime-benchmarks")]
+mod benchmarking;
+
+use frame_support::dispatch::fmt;
 use frame_support::inherent::Vec;
 use frame_support::pallet_prelude::*;
 use frame_support::sp_runtime::ArithmeticError;
@@ -21,7 +31,7 @@ pub mod pallet {
 
 	pub use super::*;
 
-	#[derive(Clone, Encode, Decode, PartialEq, RuntimeDebug, TypeInfo)]
+	#[derive(Clone, Encode, Decode, PartialEq, TypeInfo)]
 	#[scale_info(skip_type_params(T))]
 	pub struct Kitty<T: Config> {
 		dna: DNA,
@@ -29,6 +39,18 @@ pub mod pallet {
 		owner: T::AccountId,
 		gender: Gender,
 		created_date: u64,
+	}
+
+	impl<T: Config> fmt::Debug for Kitty<T> {
+		fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+			f.debug_struct("Kitty")
+				.field("dna", &self.dna)
+				.field("price", &self.price)
+				.field("owner", &self.owner)
+				.field("gender", &self.gender)
+				.field("created_date", &self.created_date)
+				.finish()
+		}
 	}
 
 	#[derive(Clone, Encode, Decode, PartialEq, Copy, RuntimeDebug, TypeInfo, MaxEncodedLen)]
@@ -47,7 +69,7 @@ pub mod pallet {
 		/// Because this pallet emits events, it depends on the runtime's definition of an event.
 		type Event: From<Event<Self>> + IsType<<Self as frame_system::Config>::Event>;
 		type UnixTime: UnixTime;
-		type Randomness: Randomness<Self::Hash, u32>;
+		type Randomness: Randomness<Self::Hash, Self::BlockNumber>;
 	}
 
 	#[pallet::pallet]
@@ -90,12 +112,11 @@ pub mod pallet {
 	impl<T: Config> Pallet<T> {
 		/// An example dispatchable that takes a singles value as a parameter, writes the value to
 		/// storage and emits an event. This function must be dispatched by a signed extrinsic.
-		#[pallet::weight(0)]
+		#[pallet::weight(46_000_000)]
 		pub fn create(origin: OriginFor<T>, price: u32) -> DispatchResult {
 			let owner = ensure_signed(origin)?;
 			let timestamp = T::UnixTime::now().as_secs();
-			let kitty_id = KittyId::<T>::get() as u8;
-			let (rand, _) = T::Randomness::random(&[timestamp as u8 * kitty_id]);
+			let (rand, _) = T::Randomness::random(&[timestamp as u8]);
 			let dna = rand.encode();
 			let gender = Self::gen_gender(&dna)?;
 			let kitty = Kitty::<T> {

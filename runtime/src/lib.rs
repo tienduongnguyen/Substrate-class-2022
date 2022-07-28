@@ -43,9 +43,9 @@ use pallet_transaction_payment::CurrencyAdapter;
 pub use sp_runtime::BuildStorage;
 pub use sp_runtime::{Perbill, Permill};
 
+pub use pallet_demo;
 pub use pallet_kitties;
 pub use pallet_loosely_coupling;
-/// Import the template pallet.
 pub use pallet_template;
 pub use pallet_tightly_coupling;
 
@@ -280,6 +280,9 @@ impl pallet_loosely_coupling::Config for Runtime {
 	type Event = Event;
 	type Increase = TemplateModule;
 }
+impl pallet_demo::Config for Runtime {
+	type Event = Event;
+}
 
 // Create the runtime by composing the FRAME pallets that were previously configured.
 construct_runtime!(
@@ -301,6 +304,7 @@ construct_runtime!(
 		Kitties: pallet_kitties,
 		Tightly: pallet_tightly_coupling,
 		Loosely: pallet_loosely_coupling,
+		Demo: pallet_demo,
 	}
 );
 
